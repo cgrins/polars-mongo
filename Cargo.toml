@@ -16,6 +16,7 @@ polars-time = "0.21.1"
 num = "^0.4"
 arrow = { package = "arrow2", git = "https://github.com/jorgecarleitao/arrow2", rev = "b9aa8e8da7648559efdc78535085a509a281c55d", default-features = false }
 rayon = "1.5.2"
+serde_yaml = "0.8.24"
 [dependencies.polars-core]
 version = "0.21.1"
 features = ["rows"]

@@ -15,8 +15,9 @@ use mongodb::{
     options::{ClientOptions, FindOptions},
     Client, Cursor,
 };
+use serde::Deserialize;
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct TableOptions {
     pub connection_str: String,
     pub db: String,
@@ -81,7 +82,7 @@ impl MongoReader {
         let mut buffers = init_buffers(&schema, 1000)?;
 
         let mut cursor = self.collection.find(None, None).await.unwrap();
-        
+
         parse_lines(cursor, &mut buffers).await.unwrap();
 
         DataFrame::new(
@@ -104,7 +105,6 @@ async fn parse_lines(
         });
     }
 
-    let nxt = cursor.current().into_iter().map(|item| {});
     todo!()
     // let mut stream = Deserializer::from_slice(bytes).into_iter::<Value>();
     // for value in stream.by_ref() {
@@ -138,7 +138,14 @@ mod test {
 
     #[tokio::test]
     async fn test_connect() {
+        let file = std::fs::File::open("./config.json").unwrap();
+        let options: TableOptions = serde_json::from_reader(file).unwrap();
+        let reader = MongoReader::connect(&options).await.unwrap();
+        let schema = reader.infer_schema(10).await.unwrap();
+        dbg!(schema);
+        reader.read().await.unwrap();
 
+        assert_eq!(true, false)
         // println!("{:#?}", schema);
     }
 }
