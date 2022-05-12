@@ -1,0 +1,29 @@
+[package]
+edition = "2021"
+name = "polars-mongo"
+version = "0.0.1"
+
+[dependencies]
+# Default enable napi4 feature, see https://nodejs.org/api/n-api.html#node-api-version-matrix
+# napi = { version = "2.3.3", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
+# napi-derive = "2.3.3"
+futures = "0.3"
+chrono = "0.4.19"
+serde_json = "1.0.81"
+serde = "1.0.137"
+tokio = { version = "1", features = ["full"] }
+polars-time = "0.21.1"
+num = "^0.4"
+arrow = { package = "arrow2", git = "https://github.com/jorgecarleitao/arrow2", rev = "b9aa8e8da7648559efdc78535085a509a281c55d", default-features = false }
+rayon = "1.5.2"
+[dependencies.polars-core]
+version = "0.21.1"
+features = ["rows"]
+
+[dependencies.mongodb]
+version = "2.2.1"
+
+[dependencies.polars]
+version = "0.21.1"
+features = ["dtype-full", "rows"]
+
