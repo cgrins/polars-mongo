@@ -1,10 +1,10 @@
+use crate::conversion::*;
 use mongodb::bson::Bson;
 use num::traits::NumCast;
 use polars_core::prelude::*;
 use polars_time::prelude::utf8::infer::infer_pattern_single;
 use polars_time::prelude::utf8::infer::DatetimeInfer;
 use polars_time::prelude::utf8::Pattern;
-use serde_json::Value;
 
 use arrow::types::NativeType;
 pub(crate) fn init_buffers(schema: &Schema, capacity: usize) -> Result<PlHashMap<String, Buffer>> {
@@ -26,11 +26,13 @@ pub(crate) fn init_buffers(schema: &Schema, capacity: usize) -> Result<PlHashMap
                     Buffer::Datetime(PrimitiveChunkedBuilder::new(name, capacity))
                 }
                 &DataType::Date => Buffer::Date(PrimitiveChunkedBuilder::new(name, capacity)),
-                other => {
-                    return Err(PolarsError::ComputeError(
-                        format!("Unsupported data type {:?} when reading a csv", other).into(),
-                    ))
+                DataType::List(dt) => {
+                    let dt = dt.as_ref();
+                    let dt = dt.clone();
+
+                    Buffer::List((Vec::new(), dt, name))
                 }
+                _ => Buffer::Utf8(Utf8ChunkedBuilder::new(name, capacity, capacity * 25)), // other => Buffer::All(Vec::new())
             };
             Ok((name.clone(), builder))
         })
@@ -38,7 +40,7 @@ pub(crate) fn init_buffers(schema: &Schema, capacity: usize) -> Result<PlHashMap
 }
 
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum Buffer {
+pub(crate) enum Buffer<'a> {
     Boolean(BooleanChunkedBuilder),
     Int32(PrimitiveChunkedBuilder<Int32Type>),
     Int64(PrimitiveChunkedBuilder<Int64Type>),
@@ -49,9 +51,11 @@ pub(crate) enum Buffer {
     Utf8(Utf8ChunkedBuilder),
     Datetime(PrimitiveChunkedBuilder<Int64Type>),
     Date(PrimitiveChunkedBuilder<Int32Type>),
+    List((Vec<AnyValue<'a>>, DataType, &'a str)),
+    // Struct((Vec<AnyValue<'a>>, Vec<Field>, &'a str)),
 }
 
-impl Buffer {
+impl<'a> Buffer<'a> {
     pub(crate) fn into_series(self) -> Result<Series> {
         let s = match self {
             Buffer::Boolean(v) => v.finish().into_series(),
@@ -68,6 +72,8 @@ impl Buffer {
                 .unwrap(),
             Buffer::Date(v) => v.finish().into_series().cast(&DataType::Date).unwrap(),
             Buffer::Utf8(v) => v.finish().into_series(),
+            Buffer::List((v, _, name)) => Series::new(name, v),
+            // Buffer::Struct((v, _, name)) => Series::new(name, v),
         };
         Ok(s)
     }
@@ -84,10 +90,10 @@ impl Buffer {
             Buffer::Utf8(v) => v.append_null(),
             Buffer::Datetime(v) => v.append_null(),
             Buffer::Date(v) => v.append_null(),
+            Buffer::List((v, _, _)) => v.push(AnyValue::Null),
+            // Buffer::Struct((v, _, _)) => v.push(AnyValue::Null),
         };
     }
-
-    #[inline]
     pub(crate) fn add(&mut self, value: &Bson) -> Result<()> {
         use Buffer::*;
         match self {
@@ -153,6 +159,9 @@ impl Buffer {
                     Bson::ObjectId(oid) => buf.append_value(oid.to_hex()),
                     Bson::JavaScriptCode(v) => buf.append_value(v),
                     Bson::String(v) => buf.append_value(v),
+                    Bson::Document(doc) => buf.append_value(doc.to_string()),
+                    Bson::Array(arr) => buf.append_value(format!("{:#?}", arr)),
+                    Bson::Symbol(s) => buf.append_value(s),
                     _ => buf.append_null(),
                 }
                 Ok(())
@@ -165,6 +174,41 @@ impl Buffer {
             Date(buf) => {
                 let v = deserialize_datetime::<Int32Type>(value);
                 buf.append_option(v);
+                Ok(())
+            }
+            List((buf, dt, _)) => {
+                match value {
+                    Bson::Array(arr) => {
+                        let s = if arr.is_empty() {
+                            match dt {
+                                DataType::Struct(flds) => {
+                                    let v: Vec<Series> = flds
+                                        .iter()
+                                        .map(|f| Series::new_empty(f.name(), f.data_type()))
+                                        .collect();
+                                    StructChunked::new("", &v).unwrap().into_series()
+                                }
+                                _ => Series::new_empty("", dt),
+                            }
+                        } else {
+                            let values: Vec<AnyValue> = arr
+                                .iter()
+                                .map(|inner| {
+                                    let av: Wrap<AnyValue> = inner.into();
+                                    av.0
+                                })
+                                .collect();
+
+                            Series::new("", values)
+                        };
+                        buf.push(AnyValue::List(s))
+                    }
+                    Bson::Binary(b) => {
+                        let s = Series::new("", &b.bytes);
+                        buf.push(AnyValue::List(s))
+                    }
+                    _ => buf.push(AnyValue::Null),
+                };
                 Ok(())
             }
         }

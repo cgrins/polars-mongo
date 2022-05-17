@@ -4,14 +4,12 @@ use crate::conversion::Wrap;
 use bson::buffer::{init_buffers, Buffer};
 use futures::stream::TryStreamExt;
 use polars::{frame::row::*, prelude::*};
-use rayon::prelude::*;
 
-// use std::fmt::Debug;
 pub mod bson;
 pub mod conversion;
 
 use mongodb::{
-    bson::{doc, Document},
+    bson::{doc, Bson, Document},
     options::{ClientOptions, FindOptions},
     Client, Cursor,
 };
@@ -47,10 +45,16 @@ impl MongoReader {
         Ok(MongoReader { collection })
     }
 
-    pub async fn infer_schema(&self, infer_schema_len: usize) -> Result<Schema> {
-        let infer_options = FindOptions::builder()
+    pub async fn infer_schema(
+        &self,
+        infer_schema_len: usize,
+        projection: &Option<Document>,
+    ) -> Result<Schema> {
+        let mut infer_options = FindOptions::builder()
             .limit(Some(infer_schema_len as i64))
             .build();
+        infer_options.projection = projection.clone();
+
         let inferable: Vec<Vec<(String, DataType)>> = self
             .collection
             .find(None, Some(infer_options))
@@ -73,15 +77,35 @@ impl MongoReader {
             })?;
 
         let schema = infer_schema(inferable.into_iter(), 1);
-        println!("Schema={:#?}", schema);
         Ok(schema)
     }
 
-    async fn read(&self) -> Result<DataFrame> {
-        let schema = self.infer_schema(10).await.unwrap();
-        let mut buffers = init_buffers(&schema, 1000)?;
+    pub async fn read<S, I>(
+        &self,
+        infer_schema_len: usize,
+        limit: usize,
+        columns: Option<I>,
+    ) -> Result<DataFrame>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let projection = columns.map(cols_to_mongo_projection);
 
-        let mut cursor = self.collection.find(None, None).await.unwrap();
+        let schema = self
+            .infer_schema(infer_schema_len, &projection)
+            .await
+            .unwrap();
+
+        let mut limit_options = FindOptions::builder().limit(Some(limit as i64)).build();
+        limit_options.projection = projection;
+
+        let mut buffers = init_buffers(&schema, limit)?;
+        let cursor = self
+            .collection
+            .find(None, Some(limit_options))
+            .await
+            .unwrap();
 
         parse_lines(cursor, &mut buffers).await.unwrap();
 
@@ -94,41 +118,28 @@ impl MongoReader {
     }
 }
 
-async fn parse_lines(
+fn cols_to_mongo_projection<S, I>(cols: I) -> Document
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let prj = cols.into_iter().map(|col| {
+        let col = col.as_ref().to_string();
+        (col, Bson::Int64(1))
+    });
+    Document::from_iter(prj)
+}
+async fn parse_lines<'a>(
     mut cursor: Cursor<Document>,
-    buffers: &mut PlHashMap<String, Buffer>,
+    buffers: &mut PlHashMap<String, Buffer<'a>>,
 ) -> mongodb::error::Result<()> {
     while let Some(doc) = cursor.try_next().await? {
         buffers.iter_mut().for_each(|(s, inner)| match doc.get(s) {
-            Some(v) => inner.add_null(),
+            Some(v) => inner.add(v).expect("inner.add(v)"),
             None => inner.add_null(),
         });
     }
-
-    todo!()
-    // let mut stream = Deserializer::from_slice(bytes).into_iter::<Value>();
-    // for value in stream.by_ref() {
-    //     let v = value.unwrap_or(Value::Null);
-    //     match v {
-    //         Value::Object(value) => {
-    //             buffers
-    //                 .iter_mut()
-    //                 .for_each(|(s, inner)| match value.get(s) {
-    //                     Some(v) => {
-    //                         inner.add(v).expect("inner.add(v)");
-    //                     }
-    //                     None => inner.add_null(),
-    //                 });
-    //         }
-    //         _ => {
-    //             buffers.iter_mut().for_each(|(_, inner)| inner.add_null());
-    //         }
-    //     };
-    // }
-
-    // let byte_offset = stream.byte_offset();
-
-    // Ok(byte_offset)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,11 +152,9 @@ mod test {
         let file = std::fs::File::open("./config.json").unwrap();
         let options: TableOptions = serde_json::from_reader(file).unwrap();
         let reader = MongoReader::connect(&options).await.unwrap();
-        let schema = reader.infer_schema(10).await.unwrap();
-        dbg!(schema);
-        reader.read().await.unwrap();
+        let df = reader.read(100, 10000, Some(vec!["ticker", "peers", "address"])).await.unwrap();
+        println!("{df}");
 
         assert_eq!(true, false)
-        // println!("{:#?}", schema);
     }
 }
